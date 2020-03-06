@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Who cares about the pick and shovel man
+# Who cares if others use him as a tool
+# It's part of the aristocratic plan
+# To keep the poor man working like a mule.
+
+# These are hard coded behavior directives.
+ONYMA=shuhvl
+OUR_DIR="~/.${ONYMA}"
+OUR_BINS="${OUR_DIR}/bin"
+MEMORY_FILE="${OUR_DIR}/memory"
+CONFIG_FILE="${OUR_DIR}/config"
+CONTROL_FILE="${OUR_DIR}/control"
+declare -A COMMAND_DISPATCH
+declare -A COMMAND_DESCRIPTIONS
+declare -A CONTAINER_MOUNTS
+
+COMPANION_CONTAINER=samrees/shuhvl:latest
+
+# utility function, sees if element is in an array
+contains() {
+  a="${3}[@]"
+  [[ "empty" == "${!a:-empty}" ]] && return 1
+  for e in "${!a}"; do [[ "${e}" == "${1}" ]] && return 0; done
+  return 1
+}
+
+dump_assoc_array() {
+  local -a 'keys=("${!'"$1"'[@]}")'
+  echo declare -A $1
+  echo $1=\( $(for k in "${keys[@]}"; do digger=$1["$k"]; echo [\"$k\"]=\"${!digger}\"; done) \)
+}
+
+fingerprint_file() {
+  local filename="${1}"
+  b3sum "$filename" | cut -d " " -f1
+}
+
+dockerized_curl() {
+  local url fingerprint download_dir local_filename local_target
+  url="${1}"           # ex: https://someserver.tld/somepath
+  download_dir="${2}"  # ex: ~/somepath (note lack of trailing slash)
+  fingerprint="${3:-}" # ex: 8c5a80011215fdc9d0280eea4b7242c4 (128bit blake2b) or empty
+
+  local_filename="${url##*/}"
+  local_target="${download_dir}/${local_filename}"
+
+  # return early if we have the right file
+#  if [[ -f "${local_target}" && -n "${fingerprint}" ]]; then
+#    [[ "$(docker run -i -v ${local_target}:/lt ${COMPANION_CONTAINER} bash -c "b2sum -l 128 /lt | cut -d'' -f1)" == "${fingerprint}" ]] && return 0
+#  fi
+
+#  curl --fail --silent "${url}" > "${local_target}"
+
+#  if [[ "${fingerprint}" != "false" ]]; then
+#    if [[ "$(shasum "${local_target}" | cut -d " " -f1)" == "${fingerprint}" ]]; then
+#      update_after_hooks "${local_filename}"
+#      return 0
+#    else
+#      echo "Error: SHA sum mismatch for "${url}", does not match "${fingerprint}", exiting immediately."
+#      return 1
+#    fi
+#  fi
+}
+
+github_file_downloader() {
+  local url etag func_name temp_file
+  url="${1}" # ex: https://raw.githubusercontent.com/samrees/shuhvl/test_rel/Dockerfile
+  etag="${2}"
+  func_name="${3}"
+  #mk tempfile
+
+
+  status_code=$(curl -o "${tempfile}" -s -H "If-None-Match: ${etag}" -w '%{http_code}' "${url}")
+  case $status_code in
+    304)
+      :;;
+    200)
+      $func_name "${tempfile}";;
+    000)
+      echo "Error";;
+  esac
+}
+
+update_bash_var() {
+  local target_key="${1}"  # ex: SUNDAY_TASK
+  local target_val="${2}"  # ex: "yeet the rich"
+  local state_file="${3}"  # ex: ~/notes/todo.txt
+
+  if rg -q "^${target_key}=" "${state_file}"; then
+    sd "^${target_key}=.+" "${target_key}=${target_val}" "${state_file}"
+  else
+    echo "${target_key}=${target_val}" >> "${state_file}"
+  fi
+}
+
+acquire_missing_deps_switcher() {
+  local dep installed_dependencies
+  readarray -t dep_list <<< "$@"
+  installed_dependencies=0
+
+  # Brew based dependency getter. This function can expand
+  # to support other things.
+  if command -v brew &> /dev/null; then
+    for dep in rg fd; do
+      contains $dep in dep_list && brew install $dep
+      let installed_dependencies+=1
+    done
+  fi
+
+  if [[ $installed_dependencies -ne ${#dep_list[@]} ]]; then
+    echo "We don't know how to install some dependencies: ${dep_list[@]}."
+    echo "This is an error, please contact the maintainer."
+    exit 9
+  fi
+}
+
+dependency_bootstrap() {
+  local required_binaries missing_binaries
+
+  if ! command -v docker &> /dev/null || ! docker ps &> /dev/null; then
+    echo "Error: ${ONYMA} does not detect a running docker, please install or start docker."
+    exit 5
+  fi
+
+  # welcome to 2020, we use better rust versions of grep and find and sed
+  # also a much faster hash function
+  required_binaries=(
+    rg
+    fd
+    sd
+    curl
+    b3sum
+  )
+  missing_binaries=()
+
+  for cmd in ${required_binaries[@]}; do
+    command -v "$cmd" > /dev/null || missing_binaries+=( "$cmd" )
+  done
+
+  if [[ ${#missing_binaries[@]} -gt 0 ]]; then
+    acquire_missing_deps_switcher ${missing_binaries[@]}
+  fi
+}
+
+memory_bootstrap() {
+  [[ -d "$OUR_DIR" ]]     || mkdir -p "$OUR_DIR"
+  [[ -f "$MEMORY_FILE" ]] || touch "$MEMORY_FILE"
+  source "$MEMORY_FILE"
+}
+
+operation_bootstrap() {
+  local operational_vars opvar
+  operational_vars=(
+    CONFIG_URL
+    RELEASE_CHANNEL
+  )
+
+  for opvar in "${operational_vars[@]}"; do
+    if [[ -z "${!opvar:-}" ]]; then
+      echo "$ONYMA is unintialized."
+      installer
+    fi
+  done
+
+  [[ -f "$CONFIG_FILE" ]] || fetch
+  [[ -f "${CONFIG_FILE}.new" ]] && mv "${CONFIG_FILE}.new" "$CONFIG_FILE"
+
+  [[ -f "$CONTROL_FILE" ]] || generate_control_file
+  [[ "$(fingerprint_file "$CONFIG_FILE")" == "${CONFIG_FINGERPRINT:-}" ]] || generate_control_file
+
+  source "$CONTROL_FILE"
+}
+
+generate_control_file() {
+  jq '.containers[].name' < "$CONFIG_FILE" &>/dev/null
+  if [[ $? -ne 0 ]]; then
+    echo "ERROR: $CONFIG_FILE corrupted, exiting."
+    exit 5
+  fi
+
+  local container_names container_tags
+  readarray container_names <<< $(jq -r '.containers[].name' < "$CONFIG_FILE")
+  readarray container_tags  <<< $(jq -r '.containers[].tags' < "$CONFIG_FILE")
+
+  local index=0 name commands descriptions mounts m command tag
+  for name in "${container_names[@]}"; do
+    if [[ "$name" != "null" ]]; then
+      tag=${container_tags[$index]}
+      [[ "$tag" == "null" ]] && tag="latest"
+
+      readarray commands     <<< $(jq -r --arg i $index '.containers[$i].commands[].name')
+      readarray descriptions <<< $(jq -r --arg i $index '.containers[$i].commands[].description')
+      readarray mounts       <<< $(jq -r --arg i $index '.containers[$i].mounts[]')
+
+      CONTAINER_MOUNTS[$name]=$(
+        for m in "${mounts[@]}"; do
+          echo "-v $m"
+        done
+      )
+
+      for command in "${commands}"; do
+        COMMAND_DISPATCH[$command]="${name}:${tag}"
+        COMMAND_DESCRIPTION[$command]=${description[$index]}
+      done
+    fi
+    let index+=1
+  done
+                                        > "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DISPATCH    >> "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DESCRIPTION >> "$CONTROL_FILE"
+  update_bash_var CONFIG_FINGERPRINT "$(fingerprint_file "$CONFIG_FILE")" "$MEMORY_FILE"
+}
+
+installer() {
+  local config_url="$1"
+  local release_channel="$2"
+
+  if [[ -z "${config_url:-}" ]]; then
+    echo "Usage: $0 install <config_url> [<release_channel>]"
+    exit 1
+  fi
+
+  update_bash_var CONFIG_URL "$config_url" "$MEMORY_FILE"
+  update_bash_var RELEASE_CHANNEL "${release_channel:-production}" "$MEMORY_FILE"
+}
+
+help() {
+}
+
+main() {
+  dependency_bootstrap
+  memory_bootstrap
+
+  case "${1:-}" in
+    install)
+      shift; installer "$@";;
+    update)
+      ;;
+  esac
+
+  operation_bootstrap
+
+  case "${1:-}" in
+    --help)
+      help;;
+  esac
+
+  see if command is valid, if not error
+
+  if command is valid, launch time scanner on path
+  if scanner is not sufficient, tell user and force update (based on max dissallow run time)
+  launch background time scanners and run
+}

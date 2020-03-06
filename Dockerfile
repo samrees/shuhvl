@@ -9,4 +9,4 @@ RUN  echo "@edge-main http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/ap
     curl \
     ripgrep@edge-community \
     fd@edge-community \
-    b2sum@edge-testing
+    b3sum@edge-testing
