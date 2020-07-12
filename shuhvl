@@ -7,12 +7,12 @@ set -euo pipefail
 # To keep the poor man working like a mule.
 
 # These are hard coded behavior directives.
-ONYMA=shuhvl
-OUR_DIR="~/.${ONYMA}"
-OUR_BINS="${OUR_DIR}/bin"
-MEMORY_FILE="${OUR_DIR}/memory"
-CONFIG_FILE="${OUR_DIR}/config"
-CONTROL_FILE="${OUR_DIR}/control"
+readonly ONYMA=shuhvl
+readonly OUR_DIR=~/."${ONYMA}"
+readonly OUR_BINS="${OUR_DIR}/bin"
+readonly MEMORY_FILE="${OUR_DIR}/memory"
+readonly CONFIG_FILE="${OUR_DIR}/config"
+readonly CONTROL_FILE="${OUR_DIR}/control"
 declare -A COMMAND_DISPATCH
 declare -A COMMAND_DESCRIPTIONS
 declare -A CONTAINER_MOUNTS
@@ -27,6 +27,7 @@ contains() {
   return 1
 }
 
+# utility function, serializes a bash associative array (hash) into something that can be bash sourced
 dump_assoc_array() {
   local -a 'keys=("${!'"$1"'[@]}")'
   echo declare -A $1
@@ -65,23 +66,34 @@ dockerized_curl() {
 #  fi
 }
 
-github_file_downloader() {
-  local url etag func_name temp_file
+# config path in a github repository is hardcoded currently
+fetch_config_file() {
+  github_relchan_downloader $CONFIG_URL ${ONYMA}_config.json $RELEASE_CHANNEL $CONFIG_FILE.new
+}
+
+github_relchan_downloader() {
+  local repo remote_file tag local_file
+  repo="${1}"        # ex: samrees/shuhvl
+  remote_file="${2}" # ex: testconfig.json
+  tag="${3}"         # ex: stable
+  local_file="${4}"  # ex: ~/somepath/testconfig.json
+
+  status_code=$(etag_file_downloader https://raw.githubusercontent.com/${repo}/${tag}/${remote_file} ${local_file})
+}
+
+# this relies on having a curl with a minimum version of 7.68
+etag_file_downloader() {
+  local url target etag_file etag_args
   url="${1}" # ex: https://raw.githubusercontent.com/samrees/shuhvl/test_rel/Dockerfile
-  etag="${2}"
-  func_name="${3}"
-  #mk tempfile
+  target="${2}"
 
+  etag_file="${OUR_DIR}/$(basename ${target})_etag"
 
-  status_code=$(curl -o "${tempfile}" -s -H "If-None-Match: ${etag}" -w '%{http_code}' "${url}")
-  case $status_code in
-    304)
-      :;;
-    200)
-      $func_name "${tempfile}";;
-    000)
-      echo "Error";;
-  esac
+  # successfully comparing the etag file will cause it not to be downloaded,
+  # not what we want in case of the target file being removed underneath us
+  [[ -f "${target}" ]] || rm -f "${etag_file}"
+
+  echo $(curl --etag-save "${etag_file}" --etag-compare "${etag_file}" -o "${target}" -s -w '%{http_code}' "${url}")
 }
 
 update_bash_var() {
@@ -112,7 +124,7 @@ acquire_missing_deps_switcher() {
 
   if [[ $installed_dependencies -ne ${#dep_list[@]} ]]; then
     echo "We don't know how to install some dependencies: ${dep_list[@]}."
-    echo "This is an error, please contact the maintainer."
+    echo "This is an error, please contact the maintainer of ${ONYMA}."
     exit 9
   fi
 }
@@ -165,7 +177,10 @@ operation_bootstrap() {
     fi
   done
 
-  [[ -f "$CONFIG_FILE" ]] || fetch
+  # We need certain files on the first run, but we also need to be prepared
+  # for delayed, asynchronous updates to files outside this process, so thus the
+  # kind of "drunk-discovering-new-things" style of this
+  [[ -f "$CONFIG_FILE" ]] || fetch_config_file
   [[ -f "${CONFIG_FILE}.new" ]] && mv "${CONFIG_FILE}.new" "$CONFIG_FILE"
 
   [[ -f "$CONTROL_FILE" ]] || generate_control_file
@@ -182,41 +197,55 @@ generate_control_file() {
   fi
 
   local container_names container_tags
-  readarray container_names <<< $(jq -r '.containers[].name' < "$CONFIG_FILE")
-  readarray container_tags  <<< $(jq -r '.containers[].tags' < "$CONFIG_FILE")
+  readarray -t container_names <<< $(jq -r '.containers[].name' "$CONFIG_FILE")
+  readarray -t container_tags  <<< $(jq -r '.containers[].tag' "$CONFIG_FILE")
 
   local index=0 name commands descriptions mounts m command tag
   for name in "${container_names[@]}"; do
-    if [[ "$name" != "null" ]]; then
-      tag=${container_tags[$index]}
-      [[ "$tag" == "null" ]] && tag="latest"
-
-      readarray commands     <<< $(jq -r --arg i $index '.containers[$i].commands[].name')
-      readarray descriptions <<< $(jq -r --arg i $index '.containers[$i].commands[].description')
-      readarray mounts       <<< $(jq -r --arg i $index '.containers[$i].mounts[]')
-
-      CONTAINER_MOUNTS[$name]=$(
-        for m in "${mounts[@]}"; do
-          echo "-v $m"
-        done
-      )
-
-      for command in "${commands}"; do
-        COMMAND_DISPATCH[$command]="${name}:${tag}"
-        COMMAND_DESCRIPTION[$command]=${description[$index]}
-      done
+    if [[ "$name" == "null" ]]; then
+      let index+=1
+      continue
     fi
+
+    tag=${container_tags[$index]}
+    [[ "$tag" == "null" ]] && tag="latest"
+
+    if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].commands' $CONFIG_FILE)" == "null" ]]; then
+      let index+=1
+      continue
+    fi
+
+    readarray -t commands     <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].name' $CONFIG_FILE)
+    readarray -t descriptions <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].description' $CONFIG_FILE)
+
+    if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].mounts' $CONFIG_FILE)" != "null" ]]; then
+      readarray -t mounts     <<< $(jq -r --arg i $index '.containers[$i|tonumber].mounts[]' $CONFIG_FILE)
+    fi
+
+    CONTAINER_MOUNTS[$name]=$(
+      for m in "${mounts[@]}"; do
+        echo "-v $m"
+      done
+    )
+
+    local command_index=0
+    for command in "${commands}"; do
+      COMMAND_DISPATCH[$command]="${name}:${tag}"
+      COMMAND_DESCRIPTIONS[$command]="${descriptions[$command_index]}"
+      let command_index+=1
+    done
+
     let index+=1
   done
                                         > "$CONTROL_FILE"
-  dump_assoc_array COMMAND_DISPATCH    >> "$CONTROL_FILE"
-  dump_assoc_array COMMAND_DESCRIPTION >> "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DISPATCH     >> "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DESCRIPTIONS >> "$CONTROL_FILE"
   update_bash_var CONFIG_FINGERPRINT "$(fingerprint_file "$CONFIG_FILE")" "$MEMORY_FILE"
 }
 
 installer() {
-  local config_url="$1"
-  local release_channel="$2"
+  local config_url="${1:-}"
+  local release_channel="${2:-}"
 
   if [[ -z "${config_url:-}" ]]; then
     echo "Usage: $0 install <config_url> [<release_channel>]"
@@ -225,9 +254,10 @@ installer() {
 
   update_bash_var CONFIG_URL "$config_url" "$MEMORY_FILE"
   update_bash_var RELEASE_CHANNEL "${release_channel:-production}" "$MEMORY_FILE"
-}
 
-help() {
+  echo "${ONYMA} has been successfully installed to ${OUR_DIR}."
+  echo "You are tracking the release_channel: [${release_channel:-production}]"
+  exit 0
 }
 
 main() {
@@ -248,9 +278,11 @@ main() {
       help;;
   esac
 
-  see if command is valid, if not error
+  #see if command is valid, if not error
 
-  if command is valid, launch time scanner on path
-  if scanner is not sufficient, tell user and force update (based on max dissallow run time)
-  launch background time scanners and run
+  #if command is valid, launch time scanner on path
+  #if scanner is not sufficient, tell user and force update (based on max dissallow run time)
+  #launch background time scanners and run
 }
+
+main "$@"
