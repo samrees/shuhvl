@@ -13,6 +13,7 @@ readonly OUR_BINS="${OUR_DIR}/bin"
 readonly MEMORY_FILE="${OUR_DIR}/memory"
 readonly CONFIG_FILE="${OUR_DIR}/config"
 readonly CONTROL_FILE="${OUR_DIR}/control"
+readonly CURRENT_TIME="$(date +%s)"
 
 COMPANION_CONTAINER=samrees/shuhvl:latest
 
@@ -129,8 +130,7 @@ check_update_time() {
   local memory_ttl_key=UPDATE_TTL_$(tr ':' '_' <<< ${key^^})
   local memory_time=${!memory_time_key:-0}
   local memory_ttl=${!memory_ttl_key:-84600} # 23.5 hours praise her skiddo
-  local current_time=$(date +%s)
-  [[ ! $((current_time-memory_time)) -gt $memory_ttl ]]
+  [[ ! $((CURRENT_TIME-memory_time)) -gt $memory_ttl ]]
 }
 
 # sets the latest update check time in our memory
@@ -353,6 +353,11 @@ dispatch_command() {
     "$@"
 }
 
+updater() {
+  fetch_onyma
+  fetch_config_file
+}
+
 installer() {
   local config_url="${1:-}"
   local release_channel="${2:-}"
@@ -428,21 +433,28 @@ display_help() {
   echo
 }
 
+## 3 branches
 main() {
+  # 1. specifically called to do a thing
   case "${1:-}" in
     install)
       shift; installer "$@";;
     update)
-      ;;
+      shift; updater "$@";;
   esac
 
+  # 2. attempts at being helpful without being asked, a sin in some parts
   [[ -d "${OUR_DIR}" ]] || installer "$@"
 
+  # 3. someones probably banging in commands like a woodpecker, warm the fires
   dependency_bootstrap
   memory_bootstrap
   operation_bootstrap
 
   source "$CONTROL_FILE"
+  # 3a. never let someone use a dull knife
+  check_update_time self || yeet ${ONYMA} update
+  # 3b. and try to help em out
   dispatch_command "$@" || display_help
 }
 
