@@ -121,6 +121,26 @@ update_bash_var() {
   fi
 }
 
+# true if we're within our update time, false if we've exceeded it
+check_update_time() {
+  local key="${1}" # ex: self, config, somedocker:latest, w/e
+
+  local memory_time_key=UPDATE_TIME_$(tr ':' '_' <<< ${key^^})
+  local memory_ttl_key=UPDATE_TTL_$(tr ':' '_' <<< ${key^^})
+  local memory_time=${!memory_time_key:-0}
+  local memory_ttl=${!memory_ttl_key:-84600} # 23.5 hours praise her skiddo
+  local current_time=$(date +%s)
+  [[ ! $((current_time-memory_time)) -gt $memory_ttl ]]
+}
+
+# sets the latest update check time in our memory
+bump_update_time() {
+  local key="${1}" # ex: self, config, somedocker:latest, w/e
+
+  local memory_time_key=UPDATE_TIME_$(tr ':' '_' <<< ${key^^})
+  update_bash_var $memory_time_key "$(date +%s)" $MEMORY_FILE
+}
+
 acquire_missing_deps_switcher() {
   local dep installed_dependencies
   readarray -t dep_list <<< "$@"
@@ -172,6 +192,7 @@ dependency_bootstrap() {
 
 memory_bootstrap() {
   [[ -d "$OUR_DIR" ]]     || mkdir -p "$OUR_DIR"
+  [[ -d "$OUR_BINS" ]]    || mkdir -p "$OUR_BINS"
   [[ -f "$MEMORY_FILE" ]] || touch "$MEMORY_FILE"
   source "$MEMORY_FILE"
 }
@@ -347,7 +368,7 @@ installer() {
   update_bash_var CONFIG_URL "$config_url" "$MEMORY_FILE"
   update_bash_var RELEASE_CHANNEL "${release_channel:-production}" "$MEMORY_FILE"
 
-  if which -s "$ONYMA"; then
+  if which "$ONYMA" &>/dev/null; then
     echo "$ONYMA is already installed, exiting."
     exit 0
   fi
@@ -400,7 +421,7 @@ inject_into_shell() {
 
 display_help() {
   local cmd pad
-  echo -e "${ONYMA}: ${DESCRIPTION:-Your Ops Toolbox}\n"
+  echo -e "${ONYMA}: ${DESCRIPTION:-the gitrdonr tool}\n"
   for cmd in "${!COMMAND_DESCRIPTIONS[@]}"; do
     printf '  %-20s %s\n' "${cmd}" "${COMMAND_DESCRIPTIONS["$cmd"]}"
   done
