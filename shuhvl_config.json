@@ -1,0 +1,26 @@
+{
+  "containers": [
+    {
+      "name": "samrees/container3",
+      "commands": [
+        {
+          "name": "jimmywhat",
+          "description": "the hell are you talking about"
+        },
+        {
+          "name": "goddamnitjimmy",
+          "description": "what on earth did you do now"
+        }
+      ],
+      "mounts": [
+        "~/.aws/:/root/.aws",
+        "~/.ssh/:/root/.ssh",
+        "/truth and reconcilation:/mnt"
+      ],
+      "envs": [
+        "AWS_PROFILE",
+        "AWS_.*"
+      ]
+    }
+  ]
+}

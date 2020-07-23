@@ -8,14 +8,11 @@ set -euo pipefail
 
 # These are hard coded behavior directives.
 readonly ONYMA=shuhvl
-readonly OUR_DIR=~/."${ONYMA}"
+readonly OUR_DIR="${HOME}/.${ONYMA}"
 readonly OUR_BINS="${OUR_DIR}/bin"
 readonly MEMORY_FILE="${OUR_DIR}/memory"
 readonly CONFIG_FILE="${OUR_DIR}/config"
 readonly CONTROL_FILE="${OUR_DIR}/control"
-declare -A COMMAND_DISPATCH
-declare -A COMMAND_DESCRIPTIONS
-declare -A CONTAINER_MOUNTS
 
 COMPANION_CONTAINER=samrees/shuhvl:latest
 
@@ -34,9 +31,22 @@ dump_assoc_array() {
   echo $1=\( $(for k in "${keys[@]}"; do digger=$1["$k"]; echo [\"$k\"]=\"${!digger}\"; done) \)
 }
 
+# utility function, seralizes a normal bash array into something that can be bashed sourced
+dump_array() {
+  a="${1}[@]"
+  [[ "empty" == "${!a:-empty}" ]] && echo $1=\( \) && return 0
+  echo $1=\( $(for e in "${!a}"; do echo -n "\"$e\" "; done) \)
+}
+
 fingerprint_file() {
   local filename="${1}"
   b3sum "$filename" | cut -d " " -f1
+}
+
+# Aint no sumeshinee when she gonnnne
+yeet() {
+  "$@" & > /dev/null
+  disown -h
 }
 
 dockerized_curl() {
@@ -66,9 +76,12 @@ dockerized_curl() {
 #  fi
 }
 
-# config path in a github repository is hardcoded currently
+# hardcoded keep it sane
+fetch_onyma() {
+  github_relchan_downloader "$CONFIG_URL" "$ONYMA" "$RELEASE_CHANNEL" "${OUR_DIR}/${ONYMA}.new"
+}
 fetch_config_file() {
-  github_relchan_downloader $CONFIG_URL ${ONYMA}_config.json $RELEASE_CHANNEL $CONFIG_FILE.new
+  github_relchan_downloader "$CONFIG_URL" "${ONYMA}_config.json" "$RELEASE_CHANNEL" "$CONFIG_FILE.new"
 }
 
 github_relchan_downloader() {
@@ -78,7 +91,7 @@ github_relchan_downloader() {
   tag="${3}"         # ex: stable
   local_file="${4}"  # ex: ~/somepath/testconfig.json
 
-  status_code=$(etag_file_downloader https://raw.githubusercontent.com/${repo}/${tag}/${remote_file} ${local_file})
+  status_code=$(etag_file_downloader "https://raw.githubusercontent.com/${repo}/${tag}/${remote_file}" "${local_file}")
 }
 
 # this relies on having a curl with a minimum version of 7.68
@@ -186,10 +199,12 @@ operation_bootstrap() {
   [[ -f "$CONTROL_FILE" ]] || generate_control_file
   [[ "$(fingerprint_file "$CONFIG_FILE")" == "${CONFIG_FINGERPRINT:-}" ]] || generate_control_file
 
-  source "$CONTROL_FILE"
 }
 
 generate_control_file() {
+
+  declare -A COMMAND_DISPATCH COMMAND_DESCRIPTIONS CONTAINER_MOUNT_CMDS CONTAINER_MOUNTS CONTAINER_ENV_CMDS CONTAINER_ENV_DYNAMIC
+
   jq '.containers[].name' < "$CONFIG_FILE" &>/dev/null
   if [[ $? -ne 0 ]]; then
     echo "ERROR: $CONFIG_FILE corrupted, exiting."
@@ -200,7 +215,7 @@ generate_control_file() {
   readarray -t container_names <<< $(jq -r '.containers[].name' "$CONFIG_FILE")
   readarray -t container_tags  <<< $(jq -r '.containers[].tag' "$CONFIG_FILE")
 
-  local index=0 name commands descriptions mounts m command tag
+  local index=0 name commands descriptions mounts m command tag envs env_plain env_regex
   for name in "${container_names[@]}"; do
     if [[ "$name" == "null" ]]; then
       let index+=1
@@ -210,37 +225,111 @@ generate_control_file() {
     tag=${container_tags[$index]}
     [[ "$tag" == "null" ]] && tag="latest"
 
-    if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].commands' $CONFIG_FILE)" == "null" ]]; then
+    if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].commands' $CONFIG_FILE)" != "null" ]]; then
+      readarray -t commands     <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].name' $CONFIG_FILE)
+      readarray -t descriptions <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].description' $CONFIG_FILE)
+
+      local command_index=0
+      for command in "${commands[@]}"; do
+        COMMAND_DISPATCH[$command]="${name}:${tag}"
+        COMMAND_DESCRIPTIONS[$command]="${descriptions[$command_index]}"
+        let command_index+=1
+      done
+    else
       let index+=1
       continue
     fi
 
-    readarray -t commands     <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].name' $CONFIG_FILE)
-    readarray -t descriptions <<< $(jq -r --arg i $index '.containers[$i|tonumber].commands[].description' $CONFIG_FILE)
-
     if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].mounts' $CONFIG_FILE)" != "null" ]]; then
       readarray -t mounts     <<< $(jq -r --arg i $index '.containers[$i|tonumber].mounts[]' $CONFIG_FILE)
+
+      CONTAINER_MOUNTS["${name}:${tag}"]="$(
+        for m in "${mounts[@]}"; do
+          echo $(cut -d ":" -f1 <<< $m)
+        done
+      )"
+
+      CONTAINER_MOUNT_CMDS["${name}:${tag}"]="$(
+        for m in "${mounts[@]}"; do
+          echo --volume \'$m\'
+        done
+      )"
     fi
 
-    CONTAINER_MOUNTS[$name]=$(
-      for m in "${mounts[@]}"; do
-        echo "-v $m"
-      done
-    )
+    if [[ "$(jq -r --arg i $index '.containers[$i|tonumber].envs' $CONFIG_FILE)" != "null" ]]; then
+      readarray -t envs    <<< $(jq -r --arg i $index '.containers[$i|tonumber].envs[]' $CONFIG_FILE)
 
-    local command_index=0
-    for command in "${commands}"; do
-      COMMAND_DISPATCH[$command]="${name}:${tag}"
-      COMMAND_DESCRIPTIONS[$command]="${descriptions[$command_index]}"
-      let command_index+=1
-    done
+      envs_plain=()
+      envs_regex=()
+      for e in "${envs[@]}"; do
+        if rg -q '^[a-zA-Z_]+[a-zA-Z0-9_]*$' <<< "$e"; then
+          envs_plain+=( "$e" )
+        else
+          envs_regex+=( "$e" )
+        fi
+      done
+
+      CONTAINER_ENV_CMDS["${name}:${tag}"]="$(
+        for e in "${envs_plain[@]}"; do
+          echo --env "$e"
+        done
+      )"
+
+      CONTAINER_ENV_DYNAMIC["${name}:${tag}"]="$(
+        for e in "${envs_regex[@]}"; do
+          echo "$e"
+        done
+      )"
+    fi
 
     let index+=1
   done
-                                        > "$CONTROL_FILE"
-  dump_assoc_array COMMAND_DISPATCH     >> "$CONTROL_FILE"
-  dump_assoc_array COMMAND_DESCRIPTIONS >> "$CONTROL_FILE"
-  update_bash_var CONFIG_FINGERPRINT "$(fingerprint_file "$CONFIG_FILE")" "$MEMORY_FILE"
+
+                                          > "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DISPATCH      >> "$CONTROL_FILE"
+  dump_assoc_array COMMAND_DESCRIPTIONS  >> "$CONTROL_FILE"
+  dump_assoc_array CONTAINER_MOUNTS      >> "$CONTROL_FILE"
+  dump_assoc_array CONTAINER_MOUNT_CMDS  >> "$CONTROL_FILE"
+  dump_assoc_array CONTAINER_ENV_CMDS    >> "$CONTROL_FILE"
+  dump_assoc_array CONTAINER_ENV_DYNAMIC >> "$CONTROL_FILE"
+  update_bash_var  CONFIG_FINGERPRINT "$(fingerprint_file "$CONFIG_FILE")" "$MEMORY_FILE"
+}
+
+dispatch_command() {
+  local commands dockerurl dockerflags dockervolumes dockerenv e ee
+
+  commands=( ${!COMMAND_DISPATCH[@]} )
+
+  if contains "${1:-}" in commands; then
+    dockerurl="${COMMAND_DISPATCH[${1}]}"
+  else
+    return 1
+  fi
+
+  # using --tty causes output to use CRLF line endings, which is problematic
+  # when trying to handle the output programmatically. so we only request
+  # a tty if both stdin _and_ stdout are already ttys.
+  # https://github.com/moby/moby/issues/8513
+  dockerflags+=( --rm --interactive )
+  [[ -t 0 && -t 1 ]] && dockerflags+=( --tty )
+
+  dockerenv+=(--env TMPDIR=/tmp)
+  dockerenv+=(--env WHOAMI=$(whoami))
+  dockerenv+=(--env USER=$(whoami))
+
+  for e in ${CONTAINER_ENV_DYNAMIC["$dockerurl"]}; do
+    for ee in $(env | rg "$e" | cut -d "=" -f1); do
+      dockerenv+=(--env "${ee}")
+    done
+  done
+
+  echo exec docker run \
+    "${dockerflags[@]}" \
+    $(echo ${CONTAINER_MOUNT_CMDS["$dockerurl"]} | tr "'" '"') \
+    $(echo ${CONTAINER_ENV_CMDS["$dockerurl"]} | tr "'" '"') \
+    "${dockerenv[@]}" \
+    "$dockerurl" \
+    "$@"
 }
 
 installer() {
@@ -248,22 +337,77 @@ installer() {
   local release_channel="${2:-}"
 
   if [[ -z "${config_url:-}" ]]; then
-    echo "Usage: $0 install <config_url> [<release_channel>]"
+    echo "Usage: ${ONYMA} install <config_url> [<release_channel>]"
     exit 1
   fi
 
+  dependency_bootstrap
+  memory_bootstrap
+
   update_bash_var CONFIG_URL "$config_url" "$MEMORY_FILE"
   update_bash_var RELEASE_CHANNEL "${release_channel:-production}" "$MEMORY_FILE"
+
+  if which -s "$ONYMA"; then
+    echo "$ONYMA is already installed, exiting."
+    exit 0
+  fi
+
+  fetch_onyma
+  [[ -f "${OUR_DIR}/${ONYMA}.new" ]] && mv "${OUR_DIR}/${ONYMA}.new" "${OUR_BINS}/${ONYMA}"
 
   echo "${ONYMA} has been successfully installed to ${OUR_DIR}."
   echo "You are tracking the release_channel: [${release_channel:-production}]"
   exit 0
 }
 
-main() {
-  dependency_bootstrap
-  memory_bootstrap
+inject_into_shell() {
+  ### sed "c" command will happily delete the file if its end marker isn't found, so some protection.
+  head_marker="###_begin_${ONYMA}_install_block_###"
+  tail_marker="###_end_${ONYMA}_install_block_###"
+  injection_line="export PATH=${OUR_BINS}:\$PATH"
 
+  ### shell detection
+  if [[ "${SHELL_TARGET:-}" == "zsh" ]]; then
+    shell_target="${HOME}/.zshrc"
+  else
+    shell_target="${HOME}/.bash_profile"
+  fi
+
+  head_marker_exists=$(grep -q "${head_marker}" "${shell_target}" && echo true || echo false)
+  tail_marker_exists=$(grep -q "${tail_marker}" "${shell_target}" && echo true || echo false)
+  if $head_marker_exists && $tail_marker_exists; then
+    # update path injection because obviously something is screwed up
+    sed -i.bak "/${head_marker}/,/${tail_marker}/c\\
+  ${head_marker}\\
+  ${injection_line}\\
+  ${tail_marker}\\
+  " "${shell_target}"
+    rm "${shell_target}.bak"
+
+  elif (! ${head_marker_exists}) && (! ${tail_marker_exists}); then
+    # inject path injection because we've proably never been installed before
+    echo "
+  ${head_marker}
+  ${injection_line}
+  ${tail_marker}
+  " >> "${shell_target}"
+  else
+    # you only have 1 head or tail marker? wtf did you do
+    echo "Something is wrong."
+    exit 5
+  fi
+}
+
+display_help() {
+  local cmd pad
+  echo -e "${ONYMA}: ${DESCRIPTION:-Your Ops Toolbox}\n"
+  for cmd in "${!COMMAND_DESCRIPTIONS[@]}"; do
+    printf '  %-20s %s\n' "${cmd}" "${COMMAND_DESCRIPTIONS["$cmd"]}"
+  done
+  echo
+}
+
+main() {
   case "${1:-}" in
     install)
       shift; installer "$@";;
@@ -271,18 +415,14 @@ main() {
       ;;
   esac
 
+  [[ -d "${OUR_DIR}" ]] || installer "$@"
+
+  dependency_bootstrap
+  memory_bootstrap
   operation_bootstrap
 
-  case "${1:-}" in
-    --help)
-      help;;
-  esac
-
-  #see if command is valid, if not error
-
-  #if command is valid, launch time scanner on path
-  #if scanner is not sufficient, tell user and force update (based on max dissallow run time)
-  #launch background time scanners and run
+  source "$CONTROL_FILE"
+  dispatch_command "$@" || display_help
 }
 
 main "$@"
