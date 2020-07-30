@@ -368,6 +368,9 @@ updater() {
 
   fetch_onyma
   fetch_config_file
+
+  bump_update_time self
+  exit 0
 }
 
 installer() {
