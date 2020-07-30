@@ -13,6 +13,7 @@ readonly OUR_BINS="${OUR_DIR}/bin"
 readonly MEMORY_FILE="${OUR_DIR}/memory"
 readonly CONFIG_FILE="${OUR_DIR}/config"
 readonly CONTROL_FILE="${OUR_DIR}/control"
+readonly PATH="${OUR_BINS}:$PATH"
 readonly CURRENT_TIME="$(date +%s)"
 
 COMPANION_CONTAINER=samrees/shuhvl:latest
@@ -101,7 +102,7 @@ etag_file_downloader() {
   url="${1}" # ex: https://raw.githubusercontent.com/samrees/shuhvl/test_rel/Dockerfile
   target="${2}"
 
-  etag_file="${OUR_DIR}/$(basename ${target})_etag"
+  etag_file="${OUR_DIR}/$(basename ${target}).etag"
 
   # successfully comparing the etag file will cause it not to be downloaded,
   # not what we want in case of the target file being removed underneath us
@@ -138,10 +139,12 @@ bump_update_time() {
   local key="${1}" # ex: self, config, somedocker:latest, w/e
 
   local memory_time_key=UPDATE_TIME_$(tr ':' '_' <<< ${key^^})
-  update_bash_var $memory_time_key "$(date +%s)" $MEMORY_FILE
+  update_bash_var $memory_time_key "${CURRENT_TIME}" $MEMORY_FILE
 }
 
-acquire_missing_deps_switcher() {
+# big ol function of going and fetching deps, preferably by peoples
+# package manager, will do what its told or will error the whole program
+acquire_missing_deps() {
   local dep installed_dependencies
   readarray -t dep_list <<< "$@"
   installed_dependencies=0
@@ -149,9 +152,12 @@ acquire_missing_deps_switcher() {
   # Brew based dependency getter. This function can expand
   # to support other things.
   if command -v brew &> /dev/null; then
-    for dep in rg fd; do
-      contains $dep in dep_list && brew install $dep
-      let installed_dependencies+=1
+    for dep in rg fd sd jq b3sum curl; do
+      if contains $dep in dep_list; then
+        brew install $dep
+        [[ "$dep" == "curl" ]] && ln -s $(brew list curl | rg -o '.+/curl$') ${OUR_BINS}/curl
+        let installed_dependencies+=1
+      fi
     done
   fi
 
@@ -162,6 +168,7 @@ acquire_missing_deps_switcher() {
   fi
 }
 
+# determines whether dependencies are installed as needed
 dependency_bootstrap() {
   local required_binaries missing_binaries
 
@@ -176,6 +183,7 @@ dependency_bootstrap() {
     rg
     fd
     sd
+    jq
     curl
     b3sum
   )
@@ -186,8 +194,10 @@ dependency_bootstrap() {
   done
 
   if [[ ${#missing_binaries[@]} -gt 0 ]]; then
-    acquire_missing_deps_switcher ${missing_binaries[@]}
+    acquire_missing_deps ${missing_binaries[@]}
   fi
+
+  curl --help | rg --quiet etag-save || acquire_missing_deps curl
 }
 
 memory_bootstrap() {
@@ -367,11 +377,23 @@ installer() {
     exit 1
   fi
 
-  dependency_bootstrap
+  if [[ "$(rg -o '^([A-z0-9-_]+)/([A-z0-9-_]+)$' <<< $config_url)" != "${config_url}" ]]; then
+    attempted_config_url=$(rg -o -r '$1/$2' 'github.com/([A-z0-9-_]+)/([A-z0-9-_]+)' <<< "${config_url}")
+    if [[ -z "${attempted_config_url}" ]]; then
+      echo "Cannot understand <config_url> of: $config_url."
+      echo "We currently understand the following repository hosts:"
+      echo "  github.com"
+      exit 7
+    fi
+    config_url="${attempted_config_url}"
+  fi
+
   memory_bootstrap
+  dependency_bootstrap
 
   update_bash_var CONFIG_URL "$config_url" "$MEMORY_FILE"
   update_bash_var RELEASE_CHANNEL "${release_channel:-production}" "$MEMORY_FILE"
+  source "$MEMORY_FILE"
 
   if which "$ONYMA" &>/dev/null; then
     echo "$ONYMA is already installed, exiting."
@@ -379,7 +401,10 @@ installer() {
   fi
 
   fetch_onyma
-  [[ -f "${OUR_DIR}/${ONYMA}.new" ]] && mv "${OUR_DIR}/${ONYMA}.new" "${OUR_BINS}/${ONYMA}"
+  if [[ -f "${OUR_DIR}/${ONYMA}.new" ]]; then
+    mv "${OUR_DIR}/${ONYMA}.new" "${OUR_BINS}/${ONYMA}"
+    chmod a+x "${OUR_BINS}/${ONYMA}"
+  fi
 
   echo "${ONYMA} has been successfully installed to ${OUR_DIR}."
   echo "You are tracking the release_channel: [${release_channel:-production}]"
