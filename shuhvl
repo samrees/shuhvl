@@ -364,6 +364,8 @@ dispatch_command() {
 }
 
 updater() {
+  memory_bootstrap
+
   fetch_onyma
   fetch_config_file
 }
@@ -451,7 +453,7 @@ inject_into_shell() {
 
 display_help() {
   local cmd pad
-  echo -e "${ONYMA}: ${DESCRIPTION:-the gitrdonr tool}\n"
+  echo -e "${ONYMA}: ${DESCRIPTION:-for digging your pickup out of the mud}\n"
   for cmd in "${!COMMAND_DESCRIPTIONS[@]}"; do
     printf '  %-20s %s\n' "${cmd}" "${COMMAND_DESCRIPTIONS["$cmd"]}"
   done
