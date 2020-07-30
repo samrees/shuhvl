@@ -224,12 +224,13 @@ operation_bootstrap() {
   # We need certain files on the first run, but we also need to be prepared
   # for delayed, asynchronous updates to files outside this process, so thus the
   # kind of "drunk-discovering-new-things" style of this
+  [[ -f "${OUR_DIR}/${ONYMA}.new" ]] && (mv "${OUR_DIR}/${ONYMA}.new" "${OUR_BINS}/${ONYMA}"; chmod a+x "${OUR_BINS}/${ONYMA}")
+
   [[ -f "$CONFIG_FILE" ]] || fetch_config_file
   [[ -f "${CONFIG_FILE}.new" ]] && mv "${CONFIG_FILE}.new" "$CONFIG_FILE"
 
   [[ -f "$CONTROL_FILE" ]] || generate_control_file
   [[ "$(fingerprint_file "$CONFIG_FILE")" == "${CONFIG_FINGERPRINT:-}" ]] || generate_control_file
-
 }
 
 generate_control_file() {
