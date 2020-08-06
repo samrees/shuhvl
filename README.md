@@ -14,4 +14,4 @@ work. So one install gets people a slowly growing, curated toolbox.
 
 ## This is not finished
 
-`curl -s https://raw.githubusercontent.com/samrees/shuhvl/initial-development/shuhvl | bash install samrees/shuhvl yolo`
+`curl -s https://raw.githubusercontent.com/samrees/shuhvl/initial-development/shuhvl | bash -s install samrees/shuhvl yolo`
